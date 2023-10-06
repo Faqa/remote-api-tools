@@ -33,7 +33,7 @@ func (s staticAuthToken) GetRequestMetadata(ctx context.Context, uri ...string) 
 		}
 	}
 	return map[string]string{
-		"authorization": fmt.Sprintf("Bearer %s", s.token),
+		"authorization": fmt.Sprintf("%s", s.token),
 	}, nil
 }
 
