@@ -17,6 +17,7 @@ package load
 import (
 	"fmt"
 	log "github.com/sirupsen/logrus"
+	"math/rand"
 	"strconv"
 	"time"
 
@@ -48,7 +49,7 @@ type generateResult struct {
 
 type generateWorkItem struct {
 	actionContext *ActionContext
-	blob          []byte
+	blobSize      int
 }
 
 type generateWorkResult struct {
@@ -87,12 +88,20 @@ func writeBlobStream(actionContext *ActionContext, data []byte) (*remote_pb.Dige
 
 func processWorkItem(wi *generateWorkItem) *generateWorkResult {
 	var digest *remote_pb.Digest
-	var err error
-	blobSize := len(wi.blob)
-	if int64(blobSize) < wi.actionContext.MaxBatchBlobSize {
-		digest, err = writeBlobBatch(wi.actionContext, wi.blob)
+	blob := make([]byte, wi.blobSize)
+	n, err := rand.Read(blob)
+	if err != nil {
+		log.Errorf("rand failed: %s", err)
+		return &generateWorkResult{err: err}
+	}
+	if n != wi.blobSize {
+		log.Errorf("rand gave less than expected")
+		return &generateWorkResult{err: err}
+	}
+	if int64(wi.blobSize) < wi.actionContext.MaxBatchBlobSize {
+		digest, err = writeBlobBatch(wi.actionContext, blob)
 	} else {
-		digest, err = writeBlobStream(wi.actionContext, wi.blob)
+		digest, err = writeBlobStream(wi.actionContext, blob)
 	}
 	if err != nil {
 		return &generateWorkResult{
@@ -144,19 +153,9 @@ func (g *generateAction) RunAction(actionContext *ActionContext) error {
 	var workItems []*generateWorkItem
 
 	for i := 0; i < g.numRequests; i++ {
-		blobSize := actionContext.RandGen.Intn(g.maxBlobSize-g.minBlobSize) + g.minBlobSize
 		wi := generateWorkItem{
 			actionContext: actionContext,
-			blob:          make([]byte, blobSize),
-		}
-		n, err := actionContext.RandGen.Read(wi.blob)
-		if err != nil {
-			log.Errorf("rand failed: %s", err)
-			return err
-		}
-		if n != blobSize {
-			log.Errorf("rand gave less than expected")
-			return err
+			blobSize:      actionContext.RandGen.Intn(g.maxBlobSize-g.minBlobSize) + g.minBlobSize,
 		}
 
 		workItems = append(workItems, &wi)
