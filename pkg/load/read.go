@@ -17,15 +17,13 @@ package load
 import (
 	"fmt"
 	log "github.com/sirupsen/logrus"
-	"math/rand"
-	"strconv"
-	"time"
-
 	"github.com/toolchainlabs/remote-api-tools/pkg/casutil"
 	"github.com/toolchainlabs/remote-api-tools/pkg/stats"
 	remote_pb "github.com/toolchainlabs/remote-api-tools/protos/build/bazel/remote/execution/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"strconv"
+	"time"
 )
 
 // This action uses the known digests of the current run to schedule read requests to the CAS.
@@ -168,7 +166,7 @@ func (self *readAction) RunAction(actionContext *ActionContext) error {
 
 	var workItems []*readWorkItem
 	for i := 0; i < self.numDigestsToRead; i++ {
-		index := rand.Int() % len(knownDigests)
+		index := actionContext.RandGen.Int() % len(knownDigests)
 		digest := knownDigests[index]
 		for j := 0; j < self.numReadsPerDigest; j++ {
 			workItem := &readWorkItem{
@@ -180,7 +178,7 @@ func (self *readAction) RunAction(actionContext *ActionContext) error {
 	}
 
 	// Shuffle the work items.
-	rand.Shuffle(len(workItems), func(i, j int) {
+	actionContext.RandGen.Shuffle(len(workItems), func(i, j int) {
 		tmp := workItems[i]
 		workItems[i] = workItems[j]
 		workItems[j] = tmp
@@ -210,11 +208,14 @@ func (self *readAction) RunAction(actionContext *ActionContext) error {
 			}).Error("request error")
 		}
 		elapsedTimes[i] = r.elapsed
+		usedBytestream := true
 		if int64(r.digest.SizeBytes) < actionContext.MaxBatchBlobSize {
 			result.blobReads += 1
+			usedBytestream = false
 		} else {
 			result.byteStreamReads += 1
 		}
+		actionContext.AddReadDigest(r.digest, usedBytestream, r.elapsed)
 
 		if i%100 == 0 {
 			log.Debugf("progress: %d / %d", i, len(workItems))
@@ -225,8 +226,9 @@ func (self *readAction) RunAction(actionContext *ActionContext) error {
 
 	close(resultChan)
 
-	fmt.Printf("program: %s\n  startTime: %s\n  endTime: %s\n  success: %d\n  errors: %d\n  byteStreamReads: %d\n  blobReads: %d\n",
+	fmt.Printf("program: %s\n  randSeed: %d\n  startTime: %s\n  endTime: %s\n  success: %d\n  errors: %d\n  byteStreamReads: %d\n  blobReads: %d\n",
 		self.String(),
+		actionContext.RandSeed,
 		result.startTime.String(),
 		result.endTime.String(),
 		result.success,

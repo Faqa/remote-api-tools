@@ -19,10 +19,26 @@ import (
 	"fmt"
 	remote_pb "github.com/toolchainlabs/remote-api-tools/protos/build/bazel/remote/execution/v2"
 	bytestream_pb "google.golang.org/genproto/googleapis/bytestream"
+	"math/rand"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
+
+type ReadDigest struct {
+	digest         *remote_pb.Digest
+	usedBytestream bool
+	duration       time.Duration
+}
+
+type WrittenDigest struct {
+	digest         *remote_pb.Digest
+	usedBytestream bool
+	duration       time.Duration
+	present        bool
+}
 
 type ActionContext struct {
 	// Go context for the current operation.
@@ -37,8 +53,12 @@ type ActionContext struct {
 
 	// Map of a digest in string form to a bool representing whether it is known to be present or missing
 	// in the CAS.
-	KnownDigests map[string]bool
-	mu           sync.Mutex
+	KnownDigests   map[string]bool
+	mu             sync.Mutex
+	RandGen        *rand.Rand
+	RandSeed       int64
+	ReadDigests    []ReadDigest
+	WrittenDigests []WrittenDigest
 }
 
 func (ac *ActionContext) AddKnownDigest(digest *remote_pb.Digest, present bool) {
@@ -46,6 +66,20 @@ func (ac *ActionContext) AddKnownDigest(digest *remote_pb.Digest, present bool) 
 	defer ac.mu.Unlock()
 
 	ac.KnownDigests[fmt.Sprintf("%s-%d", digest.Hash, digest.SizeBytes)] = present
+}
+
+func (ac *ActionContext) AddReadDigest(digest *remote_pb.Digest, usedBytestream bool, duration time.Duration) {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+
+	ac.ReadDigests = append(ac.ReadDigests, ReadDigest{digest, usedBytestream, duration})
+}
+
+func (ac *ActionContext) AddWrittenDigest(digest *remote_pb.Digest, usedBytestream bool, duration time.Duration, present bool) {
+	ac.mu.Lock()
+	defer ac.mu.Unlock()
+
+	ac.WrittenDigests = append(ac.WrittenDigests, WrittenDigest{digest, usedBytestream, duration, present})
 }
 
 func (ac *ActionContext) GetKnownDigests(presence bool) []*remote_pb.Digest {
@@ -74,7 +108,11 @@ func (ac *ActionContext) GetKnownDigests(presence bool) []*remote_pb.Digest {
 			SizeBytes: int64(sizeBytes),
 		}
 
+		i := sort.Search(len(result), func(i int) bool { return result[i].Hash >= digest.Hash })
+
 		result = append(result, &digest)
+		copy(result[i+1:], result[i:])
+		result[i] = &digest
 	}
 
 	return result
@@ -99,6 +137,10 @@ func ParseAction(actionStr string) (Action, error) {
 		return ParseLoadDigestsAction(parts[1:])
 	case "save-digests":
 		return ParseSaveDigestsAction(parts[1:])
+	case "save-read-digests":
+		return ParseSaveReadDigestsAction(parts[1:])
+	case "save-written-digests":
+		return ParseSaveWrittenDigestsAction(parts[1:])
 	default:
 		return nil, fmt.Errorf("unknown load action name: %s", parts[0])
 	}

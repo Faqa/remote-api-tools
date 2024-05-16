@@ -45,6 +45,7 @@ func main() {
 	allowInsecureAuthOpt := pflag.Bool("allow-insecure-auth", false, "allow credentials to be passed unencrypted (i.e., no TLS)")
 	writeChunkSize := pflag.Int64("write-chunk-size", 512*1024, "number of bytes per bytestream chunk")
 	maxBatchBlobSize := pflag.Int64("max-batch-blob-size", 512*1024, "maximum number of bytes per blob permitted to use BatchUpdateBlobs")
+	randSeed := pflag.Int64("rand-seed", -1, "The seed used to generate random data and indexes, for repeatable tests. Will be set to a random value if not set")
 
 	pflag.Parse()
 
@@ -127,6 +128,11 @@ func main() {
 		finalMaxBatchBlobSize = cs.maxBatchBlobSize
 	}
 
+	var finalRandSeed = *randSeed
+	for finalRandSeed == -1 {
+		finalRandSeed = rand.Int63()
+	}
+
 	actionContext := load.ActionContext{
 		InstanceName:     instanceName,
 		CasClient:        cs.casClient,
@@ -135,6 +141,10 @@ func main() {
 		KnownDigests:     make(map[string]bool),
 		WriteChunkSize:   *writeChunkSize,
 		MaxBatchBlobSize: finalMaxBatchBlobSize,
+		RandGen:          rand.New(rand.NewSource(finalRandSeed)),
+		RandSeed:         finalRandSeed,
+		ReadDigests:      make([]load.ReadDigest, 0),
+		WrittenDigests:   make([]load.WrittenDigest, 0),
 	}
 
 	for _, action := range actions {

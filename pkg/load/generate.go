@@ -17,7 +17,6 @@ package load
 import (
 	"fmt"
 	log "github.com/sirupsen/logrus"
-	"math/rand"
 	"strconv"
 	"time"
 
@@ -49,13 +48,13 @@ type generateResult struct {
 
 type generateWorkItem struct {
 	actionContext *ActionContext
-	blobSize      int
+	blob          []byte
 }
 
 type generateWorkResult struct {
-	blobSize int
-	err      error
-	elapsed  time.Duration
+	digest  *remote_pb.Digest
+	err     error
+	elapsed time.Duration
 }
 
 func generateWorker(workChan <-chan *generateWorkItem, resultChan chan<- *generateWorkResult) {
@@ -87,31 +86,18 @@ func writeBlobStream(actionContext *ActionContext, data []byte) (*remote_pb.Dige
 }
 
 func processWorkItem(wi *generateWorkItem) *generateWorkResult {
-	buf := make([]byte, wi.blobSize)
-	n, err := rand.Read(buf)
-	if err != nil {
-		log.Errorf("rand failed: %s", err)
-		return &generateWorkResult{
-			err: err,
-		}
-	}
-	if n != wi.blobSize {
-		log.Errorf("rand gave less than expected")
-		return &generateWorkResult{
-			err: err,
-		}
-	}
-
 	var digest *remote_pb.Digest
-	if int64(wi.blobSize) < wi.actionContext.MaxBatchBlobSize {
-		digest, err = writeBlobBatch(wi.actionContext, buf)
+	var err error
+	blobSize := len(wi.blob)
+	if int64(blobSize) < wi.actionContext.MaxBatchBlobSize {
+		digest, err = writeBlobBatch(wi.actionContext, wi.blob)
 	} else {
-		digest, err = writeBlobStream(wi.actionContext, buf)
+		digest, err = writeBlobStream(wi.actionContext, wi.blob)
 	}
 	if err != nil {
 		return &generateWorkResult{
-			blobSize: wi.blobSize,
-			err:      err,
+			digest: digest,
+			err:    err,
 		}
 	}
 
@@ -130,16 +116,16 @@ func processWorkItem(wi *generateWorkItem) *generateWorkResult {
 	})
 	if err != nil {
 		return &generateWorkResult{
-			blobSize: wi.blobSize,
-			err:      fmt.Errorf("failed to verify existence of blob: %s", err),
+			digest: digest,
+			err:    fmt.Errorf("failed to verify existence of blob: %s", err),
 		}
 	}
 
 	wi.actionContext.AddKnownDigest(digest, true)
 
 	return &generateWorkResult{
-		blobSize: wi.blobSize,
-		err:      nil,
+		digest: digest,
+		err:    nil,
 	}
 }
 
@@ -155,13 +141,31 @@ func (g *generateAction) RunAction(actionContext *ActionContext) error {
 		go generateWorker(workChan, resultChan)
 	}
 
+	var workItems []*generateWorkItem
+
+	for i := 0; i < g.numRequests; i++ {
+		blobSize := actionContext.RandGen.Intn(g.maxBlobSize-g.minBlobSize) + g.minBlobSize
+		wi := generateWorkItem{
+			actionContext: actionContext,
+			blob:          make([]byte, blobSize),
+		}
+		n, err := actionContext.RandGen.Read(wi.blob)
+		if err != nil {
+			log.Errorf("rand failed: %s", err)
+			return err
+		}
+		if n != blobSize {
+			log.Errorf("rand gave less than expected")
+			return err
+		}
+
+		workItems = append(workItems, &wi)
+	}
+
+	// Inject the work items into the channel.
 	go func() {
-		for i := 0; i < g.numRequests; i++ {
-			wi := generateWorkItem{
-				actionContext: actionContext,
-				blobSize:      rand.Intn(g.maxBlobSize-g.minBlobSize) + g.minBlobSize,
-			}
-			workChan <- &wi
+		for _, workItem := range workItems {
+			workChan <- workItem
 		}
 
 		close(workChan)
@@ -176,17 +180,19 @@ func (g *generateAction) RunAction(actionContext *ActionContext) error {
 		} else {
 			result.errors += 1
 			log.WithFields(log.Fields{
-				"size": r.blobSize,
+				"size": r.digest.SizeBytes,
 				"err":  r.err.Error(),
 			}).Error("request error")
 		}
 		elapsedTimes[i] = r.elapsed
-
-		if int64(r.blobSize) < actionContext.MaxBatchBlobSize {
+		usedBytestream := true
+		if int64(r.digest.SizeBytes) < actionContext.MaxBatchBlobSize {
 			result.blobWrites += 1
+			usedBytestream = false
 		} else {
 			result.byteStreamWrites += 1
 		}
+		actionContext.AddWrittenDigest(r.digest, usedBytestream, r.elapsed, true)
 
 		if i%100 == 0 {
 			log.Debugf("progress: %d / %d", i, g.numRequests)
@@ -197,8 +203,9 @@ func (g *generateAction) RunAction(actionContext *ActionContext) error {
 
 	close(resultChan)
 
-	fmt.Printf("program: %s\n  startTime: %s\n  endTime: %s\n  success: %d\n  errors: %d\n  byteStreamWrites: %d\n  blobWrites: %d\n",
+	fmt.Printf("program: %s\n  randSeed: %d\n  startTime: %s\n  endTime: %s\n  success: %d\n  errors: %d\n  byteStreamWrites: %d\n  blobWrites: %d\n",
 		g.String(),
+		actionContext.RandSeed,
 		result.startTime.String(),
 		result.endTime.String(),
 		result.success,
